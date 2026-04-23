@@ -44,7 +44,7 @@
 		}
 
 		// Default options
-		let query = artist.replace( '&', 'and' )
+		let query = artist.replace( '&', ';' )
 		const opts = Object.assign( {
 			album: null,
 			size: null
@@ -63,16 +63,38 @@
 		const clientId = '3f974573800a4ff5b325de9795b8e603'
 		const clientSecret = 'ff188d2860ff44baa57acc79c121a3b9'
 
-		let method = 'artist'
+		// Use only primary artist for better matching
+		const primaryArtist = artist.split( /[;,&]/ )[0].trim()
+		let primaryQuery = primaryArtist.replace( '&', ';' )
+
+		let method = 'album'
+		let fallbackQuery = null
+
 		if ( opts.album !== null ) {
 
 			method = 'album'
-			query += ` ${opts.album}` // add space + album name
+			fallbackQuery = `${primaryArtist} ${opts.album}`
+
+			// If artist and album are the same word, don't repeat it
+			if ( primaryArtist.toLowerCase() === opts.album.toLowerCase() ) {
+
+				query = `artist:${primaryQuery}`
+
+			} else {
+
+				query = `artist:${primaryQuery} album:${opts.album}`
+
+			}
+
+		} else {
+
+			fallbackQuery = primaryArtist
+			query = `artist:${primaryQuery}`
 
 		}
 
-		// Create a query like "<artist> <album>" and escape it
-		const queryParams = `?q=${encodeURIComponent( query )}&type=${method}&limit=1`
+		// Bump limit to 10 so we can find best artist match
+		const queryParams = `?q=${encodeURIComponent( query )}&type=${method}&limit=10`
 
 		// Create request URL
 		const searchUrl = `${apiEndpoint}/search${queryParams}`
@@ -90,6 +112,51 @@
 		} else {
 
 			throw new Error( 'No suitable environment found' )
+
+		}
+
+		// Helper to extract image url from items based on size
+		const extractImage = ( items ) => {
+
+			// Find best match where artist name matches exactly
+			const match = items.find( item =>
+				item.artists.some( a => a.name.toLowerCase() === primaryArtist.toLowerCase() )
+			) || items[0]
+
+			const images = match.images
+
+			let smallest = images[0]
+			let largest = images[0]
+
+			for ( const element of images ) {
+
+				if ( parseInt( element.width ) < parseInt( smallest.width ) ) {
+
+					smallest = element
+
+				}
+
+				if ( parseInt( element.width ) > parseInt( largest.width ) ) {
+
+					largest = element
+
+				}
+
+			}
+
+			if ( opts.size === SIZES.SMALL ) {
+
+				return smallest.url
+
+			}
+
+			if ( opts.size === SIZES.MEDIUM && images.length > 1 ) {
+
+				return images[1].url
+
+			}
+
+			return largest.url
 
 		}
 
@@ -133,54 +200,39 @@
 
 					if ( typeof ( json.error ) !== 'undefined' ) {
 
-						// Error
 						return Promise.reject( new Error( `JSON - ${json.error} ${json.message}` ) )
 
 					}
 
 					if ( !json[method + 's'] || json[method + 's'].items.length === 0 ) {
 
-						// Error
-						return Promise.reject( new Error( 'No results found' ) )
+						// Retry with loose fallback query
+						const fallbackParams = `?q=${encodeURIComponent( fallbackQuery )}&type=${method}&limit=10`
+						const fallbackUrl = `${apiEndpoint}/search${fallbackParams}`
+
+						return fetch( fallbackUrl, {
+							method: 'get',
+							headers: {
+								'Content-Type': 'application/x-www-form-urlencoded',
+								Authorization: `Bearer ${authToken}`
+							}
+						} )
+							.then( res => res.json() )
+							.then( json => {
+
+								if ( !json[method + 's'] || json[method + 's'].items.length === 0 ) {
+
+									return Promise.reject( new Error( 'No results found' ) )
+
+								}
+
+								return extractImage( json[method + 's'].items )
+
+							} )
 
 					}
 
-					// Select image size
-					const images = json[method + 's'].items[0].images
-
-					let smallest = images[0]
-					let largest = images[0]
-
-					for ( const element of images ) {
-
-						if ( parseInt( element.width ) < parseInt( smallest.width ) ) {
-
-							smallest = element
-
-						}
-
-						if ( parseInt( element.width ) > parseInt( largest.width ) ) {
-
-							largest = element
-
-						}
-
-					}
-
-					if ( opts.size === SIZES.SMALL ) {
-
-						return smallest.url
-
-					}
-
-					if ( opts.size === SIZES.MEDIUM && images.length > 1 ) {
-
-						return images[1].url
-
-					}
-
-					// Large by default
-					return largest.url
+					return extractImage( json[method + 's'].items )
 
 				}
 			)
